@@ -25,6 +25,7 @@ from utils.transformers_config import TransformersConfig
 
 CONFIG_MAPPING_NAMES = {
     'KGW': 'watermark.kgw.KGWConfig',
+    'HMMCond': 'watermark.hmm_cond.HMMCondConfig',
     'Unigram': 'watermark.unigram.UnigramConfig',
     'SWEET': 'watermark.sweet.SWEETConfig',
     'UPV': 'watermark.upv.UPVConfig',
