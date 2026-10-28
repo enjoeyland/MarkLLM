@@ -1,0 +1,10 @@
+{
+    "algorithm_name": "HMMCond",
+    "gamma": 0.25,
+    "z_target": 2.5,
+    "hash_key": 15485863,
+    "z_threshold": 4.0,
+    "hmm_checkpoint": null,
+    "max_length": 32,
+    "eos_id": 50256
+}

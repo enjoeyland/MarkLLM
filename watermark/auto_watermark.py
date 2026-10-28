@@ -26,6 +26,7 @@ from watermark.auto_config import AutoConfig
 
 WATERMARK_MAPPING_NAMES = {
     'KGW': 'watermark.kgw.KGW',
+    'HMMCond': 'watermark.hmm_cond.HMMCond',
     'Unigram': 'watermark.unigram.Unigram',
     'SWEET': 'watermark.sweet.SWEET',
     'UPV': 'watermark.upv.UPV',
