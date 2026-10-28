@@ -1,5 +1,6 @@
 """evaluation.tools.success_rate_calculator. CPU, no model.
 Run from the MarkLLM root: python -m pytest test/test_success_rate_calculator.py"""
+import math
 import os
 import random
 import sys
@@ -118,3 +119,42 @@ def test_dynamic_threshold_is_fast():
     for rule in ('best', 'target_fpr'):
         DynamicThresholdSuccessRateCalculator(rule=rule, target_fpr=0.01).calculate(w, nw)
     assert time.time() - t0 < 10
+
+
+def _threshold_at_fpr(neg, fpr):
+    """The reference definition (HMM_Watermarking watermark_eval.metrics.threshold_at_fpr): sorted non-watermarked scores,
+    k = floor(fpr * n) allowed false positives, the (k+1)-th largest (the largest if k = 0)."""
+    s = sorted(neg)
+    k = int(math.floor(fpr * len(s)))
+    if k >= len(s):   # target FPR 1: the reference fails here (index out of range); every score detected
+        return -math.inf
+    return float(s[-1] if k <= 0 else s[-k - 1])
+
+
+def test_target_fpr_from_negatives():
+    """Only non-watermarked scores used; at the threshold (>=) the non-watermarked decisions are those of 'score > reference
+    threshold', so FPR <= target and no lower threshold would do; the threshold is between the reference and the next higher
+    score (above it if there is none); reverse mirrors it."""
+    n = 0
+    for w, nw, _, fpr, _ in _cases():
+        if not nw:
+            continue
+        th = DetectionThreshold(rule='target_fpr_from_negatives', target_fpr=fpr)
+        t, ref = th.find_threshold(w, nw), _threshold_at_fpr(nw, fpr)
+        assert t == th.find_threshold([], nw)
+        assert th.decide(nw, t) == [x > ref for x in nw]
+        assert sum(th.decide(nw, t)) <= math.floor(fpr * len(nw))
+        higher = [x for x in nw if x > ref]
+        assert ref < t <= (min(higher) if higher else math.inf) or ref == t == -math.inf
+        r = DetectionThreshold(rule='target_fpr_from_negatives', target_fpr=fpr, reverse=True)
+        assert r.find_threshold([], [-x for x in nw]) == -t
+        n += 1
+    assert n > 250
+    th = DetectionThreshold(rule='target_fpr_from_negatives', target_fpr=0.01)
+    # 1,000 scores 0..999, FPR 1 %: 10 may be above 989, the threshold is the midpoint 989.5 (990..999 detected)
+    assert th.find_threshold([], [float(i) for i in range(1000)]) == 989.5
+    # 50 scores, FPR 1 %: k = 0, no higher score: just above the largest, none detected
+    t = th.find_threshold([], [float(i) for i in range(50)])
+    assert 49.0 < t < 49.0 + 1e-9 and not any(th.decide([float(i) for i in range(50)], t))
+    with pytest.raises(ValueError):
+        th.find_threshold([1.0], [])

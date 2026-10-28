@@ -17,6 +17,7 @@
 # Description: Calculate success rate of watermark detection
 # ==========================================================
 
+import math
 import numpy as np
 from typing import List, Dict, Union
 from exceptions.exceptions import TypeMismatchException, ConfigurationError
@@ -132,16 +133,21 @@ class DetectionThreshold:
         (True: watermark detected), which FundamentalSuccessRateCalculator turns into rates. Rules:
             'best'        the candidate that maximizes F1
             'target_fpr'  the first candidate whose FPR is at most target_fpr
-        The candidates are midpoints of neighbouring sorted scores (both classes), and a score at or above the threshold
-        is detected (reverse: at or below).
+            'target_fpr_from_negatives'
+                          from the non-watermarked scores only (watermarked_result may be empty): the midpoint above the
+                          smallest non-watermarked score that has at most floor(target_fpr * n) of the n above it
+        The candidates are midpoints of neighbouring sorted scores, and a score at or above the threshold is detected
+        (reverse: at or below). A midpoint is not a score, so 'score > threshold' (the detectors' z_score > z_threshold)
+        decides the same.
     """
 
-    RULES = ['best', 'target_fpr']
+    RULES = ['best', 'target_fpr', 'target_fpr_from_negatives']
 
     def __init__(self, rule='best', target_fpr=None, reverse=False) -> None:
         """
             Parameters:
-                rule (str): The rule for determining the threshold. Choose from 'best' or 'target_fpr'.
+                rule (str): The rule for determining the threshold. Choose from 'best', 'target_fpr' or
+                            'target_fpr_from_negatives'.
                 target_fpr (float): The target false positive rate to achieve.
                 reverse (bool): Whether to reverse the sorting order of the detection results.
                                 False: higher values are considered positive.
@@ -203,11 +209,30 @@ class DetectionThreshold:
         ok = fpr <= self.target_fpr
         return float(thresholds[np.argmax(ok)] if ok.any() else thresholds[-1])
 
+    def _find_threshold_from_negatives(self, inputs: List[DetectionResult]) -> float:
+        """Let t be the smallest non-watermarked score with at most k = floor(target_fpr * n) non-watermarked scores above
+        it. The threshold is the midpoint of t and the next higher non-watermarked score, so 'score >= threshold' detects
+        exactly the ones above t. If none is higher (k = 0, the largest score), the next float above t. -inf if k = n
+        (target_fpr 1: every score detected). With reverse the scores are negated, as in _candidates."""
+        sign = -1.0 if self.reverse else 1.0
+        scores = np.sort(np.array([sign * x.detect_result for x in inputs if not x.gold_label], dtype=float))
+        if len(scores) == 0:
+            raise ValueError("rule 'target_fpr_from_negatives' needs at least one non-watermarked score.")
+        k = int(math.floor(self.target_fpr * len(scores)))   # how many false positives the target allows
+        if k >= len(scores):
+            return float(sign * -np.inf)
+        t = scores[-1] if k <= 0 else scores[-k - 1]
+        above = scores[scores > t]
+        threshold = (t + above[0]) / 2 if len(above) else np.nextafter(t, np.inf)
+        return float(sign * threshold)
+
     def _find_threshold(self, inputs: List[DetectionResult]) -> float:
         """Find the threshold based on the specified rule."""
         # If the rule is to find the best threshold by maximizing F1
         if self.rule == 'best':
             return self._find_best_threshold(inputs)
+        elif self.rule == 'target_fpr_from_negatives':
+            return self._find_threshold_from_negatives(inputs)
         else:
             # If the rule is to find the threshold that achieves the target FPR
             return self._find_threshold_by_fpr(inputs)
