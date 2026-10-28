@@ -124,49 +124,54 @@ class FundamentalSuccessRateCalculator(BaseSuccessRateCalculator):
         return self._filter_metrics(metrics)
 
 
-class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
+class DetectionThreshold:
     """
-        Calculator for success rates of watermark detection with dynamic thresholding.
+        A detection threshold chosen from scores whose labels are known.
 
-        This class calculates success rates for watermark detection scenarios where the detection
-        thresholds can dynamically change based on varying conditions. It supports evaluating the
-        effectiveness of watermark detection algorithms that adapt to different signal or noise conditions.
-
-        Use this class to evaluate detection systems where the threshold for detecting a watermark
-        is not fixed and can vary.
+        find_threshold(watermarked, non_watermarked) gives the threshold; decide(scores, threshold) gives the decisions
+        (True: watermark detected), which FundamentalSuccessRateCalculator turns into rates. Rules:
+            'best'        the candidate that maximizes F1
+            'target_fpr'  the first candidate whose FPR is at most target_fpr
+        The candidates are midpoints of neighbouring sorted scores (both classes), and a score at or above the threshold
+        is detected (reverse: at or below).
     """
 
-    def __init__(self, 
-                 labels: List[str] = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC'], 
-                 rule='best', 
-                 target_fpr=None,
-                 reverse=False) -> None:
+    RULES = ['best', 'target_fpr']
+
+    def __init__(self, rule='best', target_fpr=None, reverse=False) -> None:
         """
-            Initialize the dynamic threshold success rate calculator.
-
             Parameters:
-                labels (List[str]): The list of metric labels to include in the output.
                 rule (str): The rule for determining the threshold. Choose from 'best' or 'target_fpr'.
                 target_fpr (float): The target false positive rate to achieve.
                 reverse (bool): Whether to reverse the sorting order of the detection results.
                                 False: higher values are considered positive.
                                 True: lower values are considered positive.
         """
-        super().__init__(labels)
         self.rule = rule
         self.target_fpr = target_fpr
         self.reverse = reverse
-        
+
         # Validate rule configuration
-        if self.rule not in ['best', 'target_fpr']:
-            raise ConfigurationError(f"Invalid rule specified: {self.rule}. Choose from 'best' or 'target_fpr'.")
+        if self.rule not in self.RULES:
+            raise ConfigurationError(f"Invalid rule specified: {self.rule}. Choose from {', '.join(repr(r) for r in self.RULES)}.")
 
         # Validate target_fpr configuration based on the rule
-        if self.rule == 'target_fpr':
+        if self.rule != 'best':
             if self.target_fpr is None:
-                raise ConfigurationError("target_fpr must be set when rule is 'target_fpr'.")
+                raise ConfigurationError(f"target_fpr must be set when rule is '{self.rule}'.")
             if not isinstance(self.target_fpr, (float, int)) or not (0 <= self.target_fpr <= 1):
                 raise ConfigurationError("target_fpr must be a float or int within the range [0, 1].")
+
+    def find_threshold(self, watermarked_result: List[float], non_watermarked_result: List[float]) -> float:
+        """The threshold for these scores under the rule."""
+        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in non_watermarked_result]
+        return self._find_threshold(inputs)
+
+    def decide(self, scores: List[float], threshold: float) -> List[bool]:
+        """Detection decisions at the threshold: score >= threshold (reverse: score <= threshold)."""
+        if self.reverse:
+            return [bool(x <= threshold) for x in scores]
+        return [bool(x >= threshold) for x in scores]
 
     def _candidates(self, inputs: List[DetectionResult]):
         """Candidate thresholds (midpoints of neighbouring scores, in the order of the sorted scores) and, at each, the counts
@@ -207,36 +212,47 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
             # If the rule is to find the threshold that achieves the target FPR
             return self._find_threshold_by_fpr(inputs)
 
-    def _compute_metrics(self, inputs: List[DetectionResult], threshold: float) -> Dict[str, float]:
-        """Compute metrics based on the provided inputs and threshold."""
-        if not self.reverse:
-            TP = sum(1 for x in inputs if x.detect_result >= threshold and x.gold_label)
-            FP = sum(1 for x in inputs if x.detect_result >= threshold and not x.gold_label)
-            TN = sum(1 for x in inputs if x.detect_result < threshold and not x.gold_label)
-            FN = sum(1 for x in inputs if x.detect_result < threshold and x.gold_label)
-        else:
-            TP = sum(1 for x in inputs if x.detect_result <= threshold and x.gold_label)
-            FP = sum(1 for x in inputs if x.detect_result <= threshold and not x.gold_label)
-            TN = sum(1 for x in inputs if x.detect_result > threshold and not x.gold_label)
-            FN = sum(1 for x in inputs if x.detect_result > threshold and x.gold_label)
 
-        metrics = {
-            'TPR': TP / (TP + FN) if TP + FN else 0,
-            'FPR': FP / (FP + TN) if FP + TN else 0,
-            'TNR': TN / (TN + FP) if TN + FP else 0,
-            'FNR': FN / (FN + TP) if FN + TP else 0,
-            'P': TP / (TP + FP) if TP + FP else 0,
-            'R': TP / (TP + FN) if TP + FN else 0,
-            'F1': 2 * TP / (2 * TP + FP + FN) if 2 * TP + FP + FN else 0,
-            'ACC': (TP + TN) / (len(inputs)) if inputs else 0
-        }
-        return metrics
+class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
+    """
+        Calculator for success rates of watermark detection with dynamic thresholding.
+
+        This class calculates success rates for watermark detection scenarios where the detection
+        thresholds can dynamically change based on varying conditions. It supports evaluating the
+        effectiveness of watermark detection algorithms that adapt to different signal or noise conditions.
+
+        Use this class to evaluate detection systems where the threshold for detecting a watermark
+        is not fixed and can vary. It is DetectionThreshold (the threshold and the decisions) followed by
+        FundamentalSuccessRateCalculator (the rates at that threshold).
+    """
+
+    def __init__(self, 
+                 labels: List[str] = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC'], 
+                 rule='best', 
+                 target_fpr=None,
+                 reverse=False) -> None:
+        """
+            Initialize the dynamic threshold success rate calculator.
+
+            Parameters:
+                labels (List[str]): The list of metric labels to include in the output.
+                rule (str): The rule for determining the threshold (see DetectionThreshold).
+                target_fpr (float): The target false positive rate to achieve.
+                reverse (bool): Whether to reverse the sorting order of the detection results.
+                                False: higher values are considered positive.
+                                True: lower values are considered positive.
+        """
+        super().__init__(labels)
+        self.detection_threshold = DetectionThreshold(rule, target_fpr, reverse)
+        self.rule = rule
+        self.target_fpr = target_fpr
+        self.reverse = reverse
 
     def calculate(self, watermarked_result: List[float], non_watermarked_result: List[float]) -> Dict[str, float]:
         """Calculate success rates based on provided results."""
         self._check_instance(watermarked_result + non_watermarked_result, float)
 
-        inputs = [DetectionResult(True, x) for x in watermarked_result] + [DetectionResult(False, x) for x in non_watermarked_result]
-        threshold = self._find_threshold(inputs)
-        metrics = self._compute_metrics(inputs, threshold)
-        return self._filter_metrics(metrics)
+        threshold = self.detection_threshold.find_threshold(watermarked_result, non_watermarked_result)
+        decide = self.detection_threshold.decide
+        return FundamentalSuccessRateCalculator(self.labels).calculate(decide(watermarked_result, threshold),
+                                                                       decide(non_watermarked_result, threshold))
