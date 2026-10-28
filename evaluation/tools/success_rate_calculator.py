@@ -17,6 +17,7 @@
 # Description: Calculate success rate of watermark detection
 # ==========================================================
 
+import numpy as np
 from typing import List, Dict, Union
 from exceptions.exceptions import TypeMismatchException, ConfigurationError
 
@@ -34,6 +35,15 @@ class DetectionResult:
         """
         self.gold_label = gold_label
         self.detect_result = detect_result
+
+
+def _roc_counts(watermarked: np.ndarray, non_watermarked: np.ndarray, thresholds: np.ndarray, strict: bool = False):
+    """Number of watermarked (TP) and non-watermarked (FP) scores at or above (strict: above) each threshold.
+    One sort per class and a binary search per threshold: O((N + T) log N) for N scores and T thresholds."""
+    side = 'right' if strict else 'left'
+    tp = len(watermarked) - np.searchsorted(np.sort(watermarked), thresholds, side=side)
+    fp = len(non_watermarked) - np.searchsorted(np.sort(non_watermarked), thresholds, side=side)
+    return tp, fp
 
 
 class BaseSuccessRateCalculator:
@@ -158,38 +168,44 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
             if not isinstance(self.target_fpr, (float, int)) or not (0 <= self.target_fpr <= 1):
                 raise ConfigurationError("target_fpr must be a float or int within the range [0, 1].")
 
+    def _candidates(self, inputs: List[DetectionResult]):
+        """Candidate thresholds (midpoints of neighbouring scores, in the order of the sorted scores) and, at each, the counts
+        TP, FP, FN, TN. With reverse, lower scores are positive: the scores are negated, so 'x <= t' becomes '-x >= -t'."""
+        sign = -1.0 if self.reverse else 1.0
+        scores = np.sort(np.array([sign * x.detect_result for x in inputs], dtype=float))
+        thresholds = (scores[:-1] + scores[1:]) / 2
+        watermarked = np.array([sign * x.detect_result for x in inputs if x.gold_label], dtype=float)
+        non_watermarked = np.array([sign * x.detect_result for x in inputs if not x.gold_label], dtype=float)
+        tp, fp = _roc_counts(watermarked, non_watermarked, thresholds)
+        return sign * thresholds, tp, fp, len(watermarked) - tp, len(non_watermarked) - fp
+
     def _find_best_threshold(self, inputs: List[DetectionResult]) -> float:
-        """Find the best threshold that maximizes F1."""
-        best_threshold = 0
-        best_metrics = None
-        for i in range(len(inputs) - 1):
-            threshold = (inputs[i].detect_result + inputs[i + 1].detect_result) / 2
-            metrics = self._compute_metrics(inputs, threshold)
-            if best_metrics is None or metrics['F1'] > best_metrics['F1']:
-                best_threshold = threshold
-                best_metrics = metrics
-        return best_threshold
+        """Find the best threshold that maximizes F1 (the first one if several do)."""
+        thresholds, tp, fp, fn, tn = self._candidates(inputs)
+        if len(thresholds) == 0:
+            return 0
+        denominator = 2 * tp + fp + fn
+        f1 = np.where(denominator > 0, 2 * tp / np.maximum(denominator, 1), 0)
+        return float(thresholds[np.argmax(f1)])
 
     def _find_threshold_by_fpr(self, inputs: List[DetectionResult]) -> float:
-        """Find the threshold that achieves the target FPR."""
-        threshold = 0
-        for i in range(len(inputs) - 1):
-            threshold = (inputs[i].detect_result + inputs[i + 1].detect_result) / 2
-            metrics = self._compute_metrics(inputs, threshold)
-            if metrics['FPR'] <= self.target_fpr:
-                break
-        return threshold
+        """Find the threshold that achieves the target FPR: the first candidate whose FPR is at most target_fpr (the last
+        candidate if none is)."""
+        thresholds, tp, fp, fn, tn = self._candidates(inputs)
+        if len(thresholds) == 0:
+            return 0
+        fpr = np.where(fp + tn > 0, fp / np.maximum(fp + tn, 1), 0)
+        ok = fpr <= self.target_fpr
+        return float(thresholds[np.argmax(ok)] if ok.any() else thresholds[-1])
 
     def _find_threshold(self, inputs: List[DetectionResult]) -> float:
         """Find the threshold based on the specified rule."""
-        sorted_inputs = sorted(inputs, key=lambda x: x.detect_result, reverse=self.reverse)
-        
-        # If the rule is to find the best threshold by maximizing accuracy
+        # If the rule is to find the best threshold by maximizing F1
         if self.rule == 'best':
-            return self._find_best_threshold(sorted_inputs)
+            return self._find_best_threshold(inputs)
         else:
             # If the rule is to find the threshold that achieves the target FPR
-            return self._find_threshold_by_fpr(sorted_inputs)
+            return self._find_threshold_by_fpr(inputs)
 
     def _compute_metrics(self, inputs: List[DetectionResult], threshold: float) -> Dict[str, float]:
         """Compute metrics based on the provided inputs and threshold."""
