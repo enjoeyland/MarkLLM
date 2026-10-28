@@ -27,13 +27,21 @@ from exceptions.exceptions import CodeExecutionError, InvalidAnswerError
 
 
 class TextQualityAnalyzer:
-    """Base class for text quality analyzer."""
+    """Base class for text quality analyzer.
+
+    analyze(...) scores one item; analyze_batch(...) does the same computation for many items and returns a list, one value per item.
+    The default calls analyze item by item; analyzers that run a model (PPLCalculator, BERTScoreCalculator) do it in batches of
+    batch_size."""
 
     def __init__(self) -> None:
         pass
 
     def analyze(self, text: str):
         pass
+
+    def analyze_batch(self, *columns, batch_size: int = 64) -> list:
+        """columns: one list per argument of analyze, all the same length."""
+        return [self.analyze(*args) for args in zip(*columns)]
 
 
 class DirectTextQualityAnalyzer(TextQualityAnalyzer):
@@ -45,6 +53,9 @@ class DirectTextQualityAnalyzer(TextQualityAnalyzer):
     def analyze(self, text: str):
         pass
 
+    def analyze_batch(self, texts: list, batch_size: int = 64) -> list:
+        return [self.analyze(t) for t in texts]
+
 
 class ReferencedTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for referenced text quality analyzer."""
@@ -55,6 +66,9 @@ class ReferencedTextQualityAnalyzer(TextQualityAnalyzer):
     def analyze(self, text: str, reference):
         pass
 
+    def analyze_batch(self, texts: list, references: list, batch_size: int = 64) -> list:
+        return [self.analyze(t, r) for t, r in zip(texts, references)]
+
 
 class ExternalDiscriminatorTextQualityAnalyzer(TextQualityAnalyzer):
     """Base class for external discriminator text quality analyzer."""
@@ -64,6 +78,9 @@ class ExternalDiscriminatorTextQualityAnalyzer(TextQualityAnalyzer):
 
     def analyze(self, text1: str, text2: str, description: str):
         pass
+
+    def analyze_batch(self, texts1: list, texts2: list, descriptions: list, batch_size: int = 64) -> list:
+        return [self.analyze(a, b, d) for a, b, d in zip(texts1, texts2, descriptions)]
 
 
 class PPLCalculator(DirectTextQualityAnalyzer):
@@ -90,6 +107,32 @@ class PPLCalculator(DirectTextQualityAnalyzer):
         loss = criterion(logits[:-1], encoded_text[1:])
         ppl = torch.exp(loss)
         return ppl.item()
+
+    @torch.no_grad()
+    def analyze_batch(self, texts: list, batch_size: int = 64) -> list:
+        """analyze for many texts, batch_size at a time: each text tokenized the same way (no special tokens), right-padded with an
+        attention mask (a causal model's logits at real positions do not see the padding), mean cross entropy over its own tokens
+        from the second on. A text of fewer than 2 tokens has no token to score: nan."""
+        encoded = [self.tokenizer(t, add_special_tokens=False)["input_ids"] for t in texts]
+        out = [float("nan")] * len(texts)
+        idx = [i for i, e in enumerate(encoded) if len(e) >= 2]
+        pad = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        for b in range(0, len(idx), batch_size):
+            rows = idx[b:b + batch_size]
+            L = max(len(encoded[i]) for i in rows)
+            ids = torch.full((len(rows), L), pad, dtype=torch.long)
+            mask = torch.zeros((len(rows), L), dtype=torch.long)
+            for j, i in enumerate(rows):
+                ids[j, :len(encoded[i])] = torch.tensor(encoded[i])
+                mask[j, :len(encoded[i])] = 1
+            ids, mask = ids.to(self.device), mask.to(self.device)
+            logits = self.model(input_ids=ids, attention_mask=mask, return_dict=True).logits
+            ce = torch.nn.functional.cross_entropy(logits[:, :-1].transpose(1, 2), ids[:, 1:], reduction="none")
+            m = mask[:, 1:].to(ce.dtype)
+            ppl = torch.exp((ce * m).sum(1) / m.sum(1))
+            for j, i in enumerate(rows):
+                out[i] = ppl[j].item()
+        return out
 
 
 class LogDiversityAnalyzer(DirectTextQualityAnalyzer):
@@ -219,6 +262,11 @@ class BERTScoreCalculator(ReferencedTextQualityAnalyzer):
         """Calculate the BERTScore of the given text with the reference."""
         P, R, F1 = self.bert_scorer.score([text], [reference])
         return F1.tolist()[0]
+
+    def analyze_batch(self, texts: list, references: list, batch_size: int = 64) -> list:
+        """F1 for each (text, reference) pair, batch_size pairs per BERT pass."""
+        P, R, F1 = self.bert_scorer.score(list(texts), list(references), batch_size=batch_size)
+        return F1.tolist()
 
 
 class PassOrNotJudger(ReferencedTextQualityAnalyzer):

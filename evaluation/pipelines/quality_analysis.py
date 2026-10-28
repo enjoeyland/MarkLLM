@@ -64,7 +64,8 @@ class TextQualityAnalysisPipeline:
                  analyzers: list[TextQualityAnalyzer] = None, 
                  unwatermarked_text_source='natural', 
                  show_progress: bool = True, 
-                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES) -> None:
+                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES,
+                 batch_size: int = None) -> None:
         """
             Initialize the text quality analysis pipeline.
 
@@ -76,6 +77,8 @@ class TextQualityAnalysisPipeline:
                 unwatermarked_text_source (str): The source of unwatermarked text.
                 show_progress (bool): Whether to show progress.
                 return_type (QualityPipelineReturnType): The return type of the pipeline.
+                batch_size (int): None (default) scores the texts one at a time with analyzer.analyze, as before. A number first
+                                  generates and edits all texts, then scores them with analyzer.analyze_batch, batch_size at a time.
         """
         if unwatermarked_text_source not in ['natural', 'generated']:
             raise InvalidTextSourceModeError(unwatermarked_text_source)
@@ -87,6 +90,7 @@ class TextQualityAnalysisPipeline:
         self.unwatermarked_text_source = unwatermarked_text_source
         self.show_progress = show_progress
         self.return_type = return_type
+        self.batch_size = batch_size
 
     def _get_iterable(self):
         """Return an iterable for the dataset."""
@@ -129,8 +133,14 @@ class TextQualityAnalysisPipeline:
         """Analyze quality of watermarked and unwatermarked text."""
         pass
 
+    def analyze_quality_batch(self, prepared_data_list, analyzer):
+        """analyze_quality for many items: lists of watermarked and of unwatermarked scores, one per item."""
+        pass
+
     def evaluate(self, watermark: BaseWatermark):
         """Conduct evaluation utilizing the pipeline."""
+        if self.batch_size is not None:
+            return self._format_result(self._evaluate_batched(watermark))
         evaluation_result = []
         bar = self._get_progress_bar(self._get_iterable())
 
@@ -163,6 +173,30 @@ class TextQualityAnalysisPipeline:
                 unwatermarked_scores
             ))
 
+        return self._format_result(evaluation_result)
+
+    def _evaluate_batched(self, watermark: BaseWatermark):
+        """Generate and edit all texts first, then score them with each analyzer's analyze_batch."""
+        indices, edited_watermarked, edited_unwatermarked = [], [], []
+        for index in self._get_progress_bar(self._get_iterable()):
+            prompt = self.dataset.get_prompt(index)
+            indices.append(index)
+            edited_watermarked.append(self._edit_watermarked_text(self._get_watermarked_text(watermark, index), prompt))
+            edited_unwatermarked.append(self._edit_unwatermarked_text(self._get_unwatermarked_text(watermark, index), prompt))
+
+        evaluation_result = [TextQualityComparisonResult(w, u, {}, {}) for w, u in zip(edited_watermarked, edited_unwatermarked)]
+        prepared_data_list = [self._prepare_input_for_quality_analyzer(w, u, index)
+                              for w, u, index in zip(edited_watermarked, edited_unwatermarked, indices)]
+        for analyzer in self.analyzers:
+            w_scores, u_scores = self.analyze_quality_batch(prepared_data_list, analyzer)
+            analyzer_name = analyzer.__class__.__name__
+            for result, w_score, u_score in zip(evaluation_result, w_scores, u_scores):
+                result.watermarked_quality_scores[analyzer_name] = w_score
+                result.unwatermarked_quality_scores[analyzer_name] = u_score
+        return evaluation_result
+
+    def _format_result(self, evaluation_result):
+        """Return the results in the form set by return_type."""
         # Return result based on return_type
         if self.return_type == QualityPipelineReturnType.FULL:
             return evaluation_result
@@ -210,7 +244,8 @@ class DirectTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
                  analyzers: list[TextQualityAnalyzer] = None, 
                  unwatermarked_text_source='generated', 
                  show_progress: bool = True, 
-                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES) -> None:
+                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES,
+                 batch_size: int = None) -> None:
         
         # Validate analyzers
         if analyzers:
@@ -219,7 +254,7 @@ class DirectTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
                     raise InvalidDirectAnalyzerTypeError
 
         super().__init__(dataset, watermarked_text_editor_list, unwatermarked_text_editor_list, 
-                        analyzers, unwatermarked_text_source, show_progress, return_type)
+                        analyzers, unwatermarked_text_source, show_progress, return_type, batch_size)
 
     def _get_iterable(self):
         """Return an iterable for the dataset."""
@@ -234,6 +269,13 @@ class DirectTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
         watermarked_text = prepared_data[0]
         unwatermarked_text = prepared_data[1]
         return analyzer.analyze(watermarked_text), analyzer.analyze(unwatermarked_text)
+
+    def analyze_quality_batch(self, prepared_data_list, analyzer):
+        """Analyze quality of many watermarked and unwatermarked texts, batch_size at a time."""
+        watermarked_texts = [d[0] for d in prepared_data_list]
+        unwatermarked_texts = [d[1] for d in prepared_data_list]
+        return (analyzer.analyze_batch(watermarked_texts, batch_size=self.batch_size),
+                analyzer.analyze_batch(unwatermarked_texts, batch_size=self.batch_size))
 
 
 class ReferencedTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
@@ -252,7 +294,8 @@ class ReferencedTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
                  analyzers: list[TextQualityAnalyzer] = None, 
                  unwatermarked_text_source='generated', 
                  show_progress: bool = True, 
-                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES) -> None:
+                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES,
+                 batch_size: int = None) -> None:
         """
             Initialize the referenced text quality analysis pipeline.
 
@@ -264,6 +307,8 @@ class ReferencedTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
                 unwatermarked_text_source (str): The source of unwatermarked text.
                 show_progress (bool): Whether to show progress.
                 return_type (QualityPipelineReturnType): The return type of the pipeline.
+                batch_size (int): None (default) scores the texts one at a time with analyzer.analyze, as before. A number first
+                                  generates and edits all texts, then scores them with analyzer.analyze_batch, batch_size at a time.
         """
         # Validate analyzers
         if analyzers:
@@ -272,7 +317,7 @@ class ReferencedTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
                     raise InvalidReferencedAnalyzerTypeError
                     
         super().__init__(dataset, watermarked_text_editor_list, unwatermarked_text_editor_list, 
-                        analyzers, unwatermarked_text_source, show_progress, return_type)
+                        analyzers, unwatermarked_text_source, show_progress, return_type, batch_size)
 
     def _get_iterable(self):
         """Return an iterable for the dataset."""
@@ -288,6 +333,14 @@ class ReferencedTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
         unwatermarked_text = prepared_data[1]
         reference = prepared_data[2]
         return analyzer.analyze(watermarked_text, reference), analyzer.analyze(unwatermarked_text, reference)
+
+    def analyze_quality_batch(self, prepared_data_list, analyzer):
+        """Analyze quality of many watermarked and unwatermarked texts against their references, batch_size at a time."""
+        watermarked_texts = [d[0] for d in prepared_data_list]
+        unwatermarked_texts = [d[1] for d in prepared_data_list]
+        references = [d[2] for d in prepared_data_list]
+        return (analyzer.analyze_batch(watermarked_texts, references, batch_size=self.batch_size),
+                analyzer.analyze_batch(unwatermarked_texts, references, batch_size=self.batch_size))
 
 
 class ExternalDiscriminatorTextQualityAnalysisPipeline(TextQualityAnalysisPipeline):
@@ -306,7 +359,8 @@ class ExternalDiscriminatorTextQualityAnalysisPipeline(TextQualityAnalysisPipeli
                  analyzers: list[TextQualityAnalyzer] = None, 
                  unwatermarked_text_source='generated', 
                  show_progress: bool = True, 
-                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES) -> None:
+                 return_type: QualityPipelineReturnType = QualityPipelineReturnType.MEAN_SCORES,
+                 batch_size: int = None) -> None:
         """
             Initialize the external discriminator-based text quality analysis pipeline.
 
@@ -318,6 +372,8 @@ class ExternalDiscriminatorTextQualityAnalysisPipeline(TextQualityAnalysisPipeli
                 unwatermarked_text_source (str): The source of unwatermarked text.
                 show_progress (bool): Whether to show progress.
                 return_type (QualityPipelineReturnType): The return type of the pipeline.
+                batch_size (int): None (default) scores the texts one at a time with analyzer.analyze, as before. A number first
+                                  generates and edits all texts, then scores them with analyzer.analyze_batch, batch_size at a time.
         """
         # Validate analyzers
         if analyzers:
@@ -326,7 +382,7 @@ class ExternalDiscriminatorTextQualityAnalysisPipeline(TextQualityAnalysisPipeli
                     raise InvalidReferencedAnalyzerTypeError
                     
         super().__init__(dataset, watermarked_text_editor_list, unwatermarked_text_editor_list, 
-                        analyzers, unwatermarked_text_source, show_progress, return_type)
+                        analyzers, unwatermarked_text_source, show_progress, return_type, batch_size)
 
     def _get_iterable(self):
         """Return an iterable for the dataset."""
