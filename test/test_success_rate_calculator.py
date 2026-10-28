@@ -9,8 +9,8 @@ import time
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from evaluation.tools.success_rate_calculator import (DetectionResult, DetectionThreshold, DynamicThresholdSuccessRateCalculator,  # noqa: E402
-                                                     FundamentalSuccessRateCalculator)
+from evaluation.tools.success_rate_calculator import (AUROCCalculator, DetectionResult, DetectionThreshold,  # noqa: E402
+                                                     DynamicThresholdSuccessRateCalculator, FundamentalSuccessRateCalculator)
 
 LABELS = ['TPR', 'TNR', 'FPR', 'FNR', 'P', 'R', 'F1', 'ACC']
 
@@ -158,3 +158,32 @@ def test_target_fpr_from_negatives():
     assert 49.0 < t < 49.0 + 1e-9 and not any(th.decide([float(i) for i in range(50)], t))
     with pytest.raises(ValueError):
         th.find_threshold([1.0], [])
+
+
+def _auroc_rank(pos, neg):
+    """The reference (HMM_Watermarking watermark_eval.metrics.auroc): Mann-Whitney, average ranks for ties."""
+    values = sorted(pos + neg)
+    first, last = {}, {}
+    for i, v in enumerate(values, 1):
+        first.setdefault(v, i)
+        last[v] = i
+    rank_sum = sum((first[v] + last[v]) / 2 for v in pos)
+    return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+
+
+def test_auroc():
+    """Pairs (watermarked above: 1, tie: 1/2) and the rank formula, bit for bit; reverse mirrors; the worked example."""
+    n = 0
+    for w, nw, _, _, _ in _cases():
+        if not w or not nw:
+            continue
+        a = AUROCCalculator().calculate(w, nw)['AUROC']
+        pairs = sum(1.0 if x > y else 0.5 if x == y else 0.0 for x in w for y in nw) / (len(w) * len(nw))
+        assert a == _auroc_rank(w, nw) and a == pytest.approx(pairs, rel=1e-12, abs=0)
+        assert AUROCCalculator(reverse=True).calculate([-x for x in w], [-x for x in nw])['AUROC'] == a
+        n += 1
+    assert n > 250
+    # watermarked [3, 2], non-watermarked [2, 1]: ROC points (0, .5), (.5, 1), (1, 1); area .875 = (1 + 1 + .5 + 1) / 4
+    assert AUROCCalculator().calculate([3.0, 2.0], [2.0, 1.0]) == {'AUROC': 0.875}
+    with pytest.raises(ValueError):
+        AUROCCalculator().calculate([1.0], [])

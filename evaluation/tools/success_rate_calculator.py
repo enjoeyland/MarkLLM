@@ -281,3 +281,38 @@ class DynamicThresholdSuccessRateCalculator(BaseSuccessRateCalculator):
         decide = self.detection_threshold.decide
         return FundamentalSuccessRateCalculator(self.labels).calculate(decide(watermarked_result, threshold),
                                                                        decide(non_watermarked_result, threshold))
+
+
+class AUROCCalculator(BaseSuccessRateCalculator):
+    """
+        Area under the ROC curve of the detection scores: the chance that a watermarked score is above a non-watermarked one
+        (ties count 1/2). No threshold; 1 is perfect separation, 0.5 chance.
+
+        The ROC points are the (FPR, TPR) at each distinct score as threshold (score >= threshold detected, reverse: <=),
+        from the same counts as DetectionThreshold (_roc_counts); the area is the trapezoid sum, in counts, so ties give the
+        diagonal pieces that make them 1/2.
+    """
+
+    def __init__(self, labels: List[str] = ['AUROC'], reverse=False) -> None:
+        """
+            Parameters:
+                labels (List[str]): The list of metric labels to include in the output.
+                reverse (bool): False: higher values are considered positive. True: lower values are considered positive.
+        """
+        super().__init__(labels)
+        self.reverse = reverse
+
+    def calculate(self, watermarked_result: List[float], non_watermarked_result: List[float]) -> Dict[str, float]:
+        """AUROC of the watermarked against the non-watermarked scores."""
+        self._check_instance(watermarked_result + non_watermarked_result, float)
+        if not watermarked_result or not non_watermarked_result:
+            raise ValueError("AUROC needs at least one watermarked and one non-watermarked score.")
+
+        sign = -1.0 if self.reverse else 1.0
+        watermarked = sign * np.array(watermarked_result, dtype=float)
+        non_watermarked = sign * np.array(non_watermarked_result, dtype=float)
+        thresholds = np.unique(np.concatenate([watermarked, non_watermarked]))[::-1]   # strictest first
+        tp, fp = _roc_counts(watermarked, non_watermarked, thresholds)
+        tp, fp = np.concatenate([[0], tp]), np.concatenate([[0], fp])
+        twice_area = int(np.sum((fp[1:] - fp[:-1]) * (tp[1:] + tp[:-1])))   # in counts: exact
+        return self._filter_metrics({'AUROC': twice_area / (2 * len(watermarked) * len(non_watermarked))})
