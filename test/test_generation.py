@@ -50,16 +50,18 @@ class Record(GenerationHook):
         return dict(n_scores=len(out.scores))
 
 
-def test_one_result_per_prompt_in_batches(model_tok):
+def test_one_result_per_prompt_one_batch_per_call(model_tok):
     model, tok = model_tok
     hook = Record()
-    gen = WatermarkGenerator(model, tok, batch_size=2, hooks=[hook], max_new_tokens=5, do_sample=True)
+    gen = WatermarkGenerator(model, tok, hooks=[hook], max_new_tokens=5, do_sample=True)
     prompts = ["The dog", "A cat sat on the", "Hi"]
     outs = gen.generate(prompts, watermark=Bias())
     assert [o.prompt for o in outs] == prompts
     assert all(o.text.startswith(p) for o, p in zip(outs, prompts))
     assert all(1 <= o.ntok <= 5 and len(o.tokens) == o.ntok for o in outs)
-    assert hook.batches == 2 and hook.wrapped == 2 and all(o.extras["n_scores"] >= 1 for o in outs)
+    assert hook.batches == 1 and hook.wrapped == 1 and all(o.extras["n_scores"] >= 1 for o in outs)
+    gen.generate(prompts[:1], watermark=Bias())   # the caller batches: each call is one batch
+    assert hook.batches == 2
 
 
 def test_no_watermark(model_tok):
