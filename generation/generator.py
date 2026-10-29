@@ -1,12 +1,13 @@
 """WatermarkGenerator: the batched counterpart of `generate_watermarked_text`, for any watermark that has a `logits_processor`.
 
 Each algorithm's `generate_watermarked_text` takes one prompt and returns one text. This generator takes a list of prompts,
-generates them in batches (left padding), and returns one `GeneratedText` per prompt. What else to do during generation is
+generates them as ONE batch (left padding), and returns one `GeneratedText` per prompt. Splitting the data into batches is
+the caller's job (e.g. a torch DataLoader), so there is one place that decides the batch size. What else to do during generation is
 added with hooks (`GenerationHook`), so one generator class serves every use:
 
     hf_kwargs()                        extra arguments for `model.generate` (e.g. output_scores=True)
     wrap_processor(processor)          wrap the watermark's logits processor (called with None when there is no watermark)
-    before_batch(watermark, prompts)   called before each batch (e.g. reset a stateful processor)
+    before_batch(watermark, prompts)   called before each generate call (e.g. reset a stateful processor)
     collect(out, row, new_tokens, ntok) -> dict   per-sentence values stored in GeneratedText.extras
 
 The generation itself is the same as `generate_watermarked_text`: `model.generate(**encoded_prompts,
@@ -48,10 +49,8 @@ class GeneratedText:
 
 
 class WatermarkGenerator:
-    def __init__(self, model, tokenizer, batch_size: int = 32, hooks: Sequence[GenerationHook] = (), device: Optional[str] = None,
-                 **gen_kwargs):
+    def __init__(self, model, tokenizer, hooks: Sequence[GenerationHook] = (), device: Optional[str] = None, **gen_kwargs):
         self.model, self.tokenizer = model, tokenizer
-        self.batch_size = batch_size
         self.hooks = list(hooks)
         self.device = device or str(next(model.parameters()).device)
         self.gen_kwargs = gen_kwargs
@@ -69,13 +68,8 @@ class WatermarkGenerator:
 
     @torch.no_grad()
     def generate(self, prompts: Sequence[str], watermark=None) -> List[GeneratedText]:
+        """The prompts are generated together as one batch."""
         prompts = list(prompts)
-        res: List[GeneratedText] = []
-        for b in range(0, len(prompts), self.batch_size):
-            res += self._generate_batch(prompts[b:b + self.batch_size], watermark)
-        return res
-
-    def _generate_batch(self, prompts: List[str], watermark) -> List[GeneratedText]:
         tok = self.tokenizer
         processor = getattr(watermark, "logits_processor", None) if watermark is not None else None
         if watermark is not None and processor is None:
